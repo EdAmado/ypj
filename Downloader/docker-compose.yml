@@ -1,0 +1,31 @@
+services:
+
+  jellyfin:
+    image: jellyfin/jellyfin:latest
+    container_name: jellyfin
+
+    restart: unless-stopped
+
+    ports:
+      - "8096:8096"
+
+    volumes:
+      - D:/Jellyfin/config:/config
+      - D:/Jellyfin/cache:/cache
+      - D:/Jellyfin/Music:/music
+
+  yt-downloader:
+    build: .
+
+    container_name: yt-downloader
+
+    restart: unless-stopped
+
+    ports:
+      - "8080:8080"
+
+    volumes:
+      - D:/Jellyfin/Music:/downloads
+
+    env_file:
+      - .env

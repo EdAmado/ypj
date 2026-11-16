@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+    <title>YouTube Downloader</title>
+
+    <style>
+        body {
+            font-family: Arial;
+            margin: 50px;
+        }
+
+        input {
+
+            width: 700px;
+            padding: 10px;
+
+        }
+
+        button {
+
+            padding: 10px 30px;
+
+        }
+    </style>
+
+</head>
+
+<body>
+
+    <h2>YouTube Downloader</h2>
+
+	<form action="/" method="post">
+		<input
+			type="text"
+			name="url"
+			placeholder="Paste YouTube URL"
+			required>
+		<button type="submit">Download</button>
+	</form>
+
+	<p>{{ message }}</p>
+
+</body>
+
+</html>
