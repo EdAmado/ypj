@@ -9,6 +9,7 @@ import requests
 import os
 import re
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 
 app = FastAPI()
 
@@ -153,16 +154,13 @@ def download_video(video_url, video_index, playlist_dir, is_playlist):
     # --------------------------------------------------
 
     if not chapters:
-        raise Exception(
-            "No chapters detected. Refusing to download "
-            "the entire video as one Opus file."
-        )
-        print(f"No chapters found: {title}")
+        print(f"No chapters found, downloading as single Opus: {title}")
 
         prefix = f"{video_index:02d} - " if is_playlist else ""
 
         download_opts = {
-            "format": "bestaudio/best",
+            # Prefer YouTube's native Opus stream so no re-encode is needed
+            "format": "bestaudio[acodec=opus]/bestaudio/best",
 
             "outtmpl": os.path.join(
                 playlist_dir,
@@ -203,7 +201,7 @@ def download_video(video_url, video_index, playlist_dir, is_playlist):
         return f"Downloaded Opus: {title}"
 
     # --------------------------------------------------
-    # CHAPTERS FOUND: DOWNLOAD AND SPLIT INTO WAV
+    # CHAPTERS FOUND: DOWNLOAD AND SPLIT INTO OPUS
     # --------------------------------------------------
 
     print(f"Found {len(chapters)} chapters: {title}")
@@ -223,9 +221,11 @@ def download_video(video_url, video_index, playlist_dir, is_playlist):
 
     try:
 
-        # Download original audio
+        # Download original audio.
+        # YouTube serves Opus natively (format 251), so prefer it: chapters
+        # can then be cut with a stream copy instead of a re-encode.
         download_opts = {
-            "format": "bestaudio/best",
+            "format": "bestaudio[acodec=opus]/bestaudio/best",
 
             "outtmpl": os.path.join(
                 temp_dir,
@@ -238,7 +238,9 @@ def download_video(video_url, video_index, playlist_dir, is_playlist):
         }
 
         with yt_dlp.YoutubeDL(download_opts) as ydl:
-            ydl.extract_info(video_url, download=True)
+            dl_info = ydl.extract_info(video_url, download=True)
+
+        source_is_opus = (dl_info.get("acodec") or "").startswith("opus")
 
         # Find downloaded audio file
         audio_files = [
@@ -252,8 +254,9 @@ def download_video(video_url, video_index, playlist_dir, is_playlist):
 
         audio_file = audio_files[0]
 
-        # Split chapters
         # Split chapters into individual OPUS files
+        jobs = []
+
         for i, chapter in enumerate(chapters, start=1):
 
             start = chapter["start_time"]
@@ -281,33 +284,54 @@ def download_video(video_url, video_index, playlist_dir, is_playlist):
                 print(f"Already exists: {output_file}")
                 continue
 
-            subprocess.run(
-                [
-                    "ffmpeg",
-                    "-y",
-
-                    "-i", audio_file,
-
-                    "-ss", str(start),
-                    "-t", str(end - start),
-
-                    "-vn",
-
+            if source_is_opus:
+                # Lossless and near-instant: just copy the Opus packets
+                codec_args = ["-c:a", "copy"]
+            else:
+                codec_args = [
                     "-c:a", "libopus",
                     "-b:a", "128k",
                     "-vbr", "on",
-                    "-compression_level", "10",
                     "-application", "audio",
+                ]
 
-                    "-metadata", f"title={chapter_title}",
-                    "-metadata", f"artist={uploader}",
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-hide_banner",
+                "-loglevel", "error",
 
-                    output_file,
-                ],
-                check=True,
-            )
+                # -ss BEFORE -i = fast input seek (jumps straight to the
+                # chapter instead of decoding everything before it)
+                "-ss", str(start),
+                "-t", str(end - start),
+                "-i", audio_file,
 
+                "-map", "0:a:0",
+                "-vn",
+                *codec_args,
+
+                "-metadata", f"title={chapter_title}",
+                "-metadata", f"artist={uploader}",
+                "-metadata", f"album={title}",
+                "-metadata", f"track={i}/{len(chapters)}",
+
+                output_file,
+            ]
+
+            jobs.append((cmd, output_file))
+
+        def run_job(job):
+            cmd, output_file = job
+            subprocess.run(cmd, check=True)
             print(f"Created: {output_file}")
+
+        # Copies are I/O-bound and quick; re-encodes use one core each
+        workers = 4 if source_is_opus else (os.cpu_count() or 2)
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            # list() re-raises the first ffmpeg failure, if any
+            list(pool.map(run_job, jobs))
 
         # Mark video completed only after all chapters succeed
         add_to_archive(video_id)
